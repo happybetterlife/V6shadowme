@@ -1,0 +1,466 @@
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks
+from fastapi.responses import JSONResponse
+from typing import List, Optional, Dict, Any
+import uuid
+import logging
+from datetime import datetime
+
+from app.core.security import get_current_user
+from app.services.voice_cloning.voice_cloning_service import VoiceCloningService
+from app.services.firebase.firebase_service import FirebaseService
+from app.models.voice.voice_model import VoiceModel, VoiceStatus
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+@router.post("/", response_model=Dict[str, Any])
+async def create_voice_model(
+    background_tasks: BackgroundTasks,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    name: str = Form(...),
+    description: str = Form(""),
+    audio_files: List[UploadFile] = File(...)
+):
+    """Create a new voice model"""
+    try:
+        # Validate input
+        if not name or len(name.strip()) < 2:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Voice model name must be at least 2 characters long"
+            )
+        
+        if not audio_files or len(audio_files) < 3:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least 3 audio files are required"
+            )
+        
+        if len(audio_files) > 20:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Maximum 20 audio files allowed"
+            )
+        
+        # Validate audio files
+        for file in audio_files:
+            if not file.content_type or not file.content_type.startswith('audio/'):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File {file.filename} is not a valid audio file"
+                )
+        
+        # Create voice model record
+        model_id = str(uuid.uuid4())
+        user_id = current_user["uid"]
+        
+        voice_model_data = {
+            "id": model_id,
+            "user_id": user_id,
+            "name": name.strip(),
+            "description": description.strip(),
+            "status": VoiceStatus.PENDING.value,
+            "created_at": datetime.utcnow().isoformat(),
+            "quality": {
+                "clarity": 0.0,
+                "naturalness": 0.0,
+                "similarity": 0.0,
+                "overall": 0.0,
+            },
+            "sample_files": [],
+            "model_config": {},
+            "metrics": {
+                "total_samples": 0,
+                "total_duration": 0.0,
+                "average_sample_length": 0.0,
+                "primary_language": "en",
+                "average_volume": 0.0,
+                "average_pitch": 0.0,
+            },
+            "processing": {
+                "started_at": None,
+                "completed_at": None,
+                "error_message": None,
+            }
+        }
+        
+        # Save to Firestore
+        firebase_service = FirebaseService()
+        await firebase_service.create_voice_model(voice_model_data)
+        
+        # Start background processing
+        background_tasks.add_task(
+            process_voice_model_background,
+            model_id,
+            user_id,
+            audio_files
+        )
+        
+        return {
+            "message": "Voice model creation started",
+            "model_id": model_id,
+            "status": "pending",
+            "estimated_processing_time": "5-10 minutes"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create voice model: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create voice model"
+        )
+
+@router.get("/", response_model=List[Dict[str, Any]])
+async def get_voice_models(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    limit: int = 20,
+    offset: int = 0,
+    status_filter: Optional[str] = None
+):
+    """Get user's voice models"""
+    try:
+        user_id = current_user["uid"]
+        firebase_service = FirebaseService()
+        
+        voice_models = await firebase_service.get_user_voice_models(
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+            status_filter=status_filter
+        )
+        
+        return voice_models
+        
+    except Exception as e:
+        logger.error(f"Failed to get voice models: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve voice models"
+        )
+
+@router.get("/{model_id}", response_model=Dict[str, Any])
+async def get_voice_model(
+    model_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Get specific voice model"""
+    try:
+        user_id = current_user["uid"]
+        firebase_service = FirebaseService()
+        
+        voice_model = await firebase_service.get_voice_model(model_id)
+        
+        if not voice_model:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Voice model not found"
+            )
+        
+        # Check ownership
+        if voice_model["user_id"] != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+        
+        return voice_model
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get voice model: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve voice model"
+        )
+
+@router.post("/{model_id}/generate", response_model=Dict[str, Any])
+async def generate_speech(
+    model_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    text: str = Form(...),
+    speed: float = Form(1.0),
+    pitch: float = Form(0.0),
+    emotion: Optional[str] = Form(None)
+):
+    """Generate speech using voice model"""
+    try:
+        # Validate input
+        if not text or len(text.strip()) < 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Text is required"
+            )
+        
+        if len(text) > 1000:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Text too long (max 1000 characters)"
+            )
+        
+        if not 0.5 <= speed <= 2.0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Speed must be between 0.5 and 2.0"
+            )
+        
+        if not -12.0 <= pitch <= 12.0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Pitch must be between -12.0 and 12.0"
+            )
+        
+        user_id = current_user["uid"]
+        firebase_service = FirebaseService()
+        
+        # Check if model exists and user has access
+        voice_model = await firebase_service.get_voice_model(model_id)
+        if not voice_model:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Voice model not found"
+            )
+        
+        if voice_model["user_id"] != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+        
+        if voice_model["status"] != VoiceStatus.COMPLETED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Voice model is not ready for generation"
+            )
+        
+        # Create generation record
+        generation_id = str(uuid.uuid4())
+        generation_data = {
+            "id": generation_id,
+            "user_id": user_id,
+            "voice_model_id": model_id,
+            "input_text": text.strip(),
+            "output_file_path": None,
+            "parameters": {
+                "speed": speed,
+                "pitch": pitch,
+                "emotion": emotion,
+            },
+            "status": VoiceStatus.PENDING.value,
+            "processing_time": None,
+            "error_message": None,
+            "created_at": datetime.utcnow().isoformat(),
+            "completed_at": None,
+        }
+        
+        await firebase_service.create_voice_generation(generation_data)
+        
+        # Start background generation
+        background_tasks.add_task(
+            generate_speech_background,
+            generation_id,
+            model_id,
+            text.strip(),
+            speed,
+            pitch,
+            emotion
+        )
+        
+        return {
+            "message": "Speech generation started",
+            "generation_id": generation_id,
+            "status": "pending",
+            "estimated_processing_time": "30-60 seconds"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to generate speech: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate speech"
+        )
+
+@router.delete("/{model_id}")
+async def delete_voice_model(
+    model_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Delete voice model"""
+    try:
+        user_id = current_user["uid"]
+        firebase_service = FirebaseService()
+        
+        # Check if model exists and user has access
+        voice_model = await firebase_service.get_voice_model(model_id)
+        if not voice_model:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Voice model not found"
+            )
+        
+        if voice_model["user_id"] != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+        
+        # Delete model
+        await firebase_service.delete_voice_model(model_id)
+        
+        return {"message": "Voice model deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete voice model: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete voice model"
+        )
+
+@router.get("/{model_id}/generations", response_model=List[Dict[str, Any]])
+async def get_voice_generations(
+    model_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    limit: int = 20,
+    offset: int = 0
+):
+    """Get voice generation history for a model"""
+    try:
+        user_id = current_user["uid"]
+        firebase_service = FirebaseService()
+        
+        # Check if model exists and user has access
+        voice_model = await firebase_service.get_voice_model(model_id)
+        if not voice_model:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Voice model not found"
+            )
+        
+        if voice_model["user_id"] != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied"
+            )
+        
+        generations = await firebase_service.get_voice_generations(
+            model_id=model_id,
+            limit=limit,
+            offset=offset
+        )
+        
+        return generations
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get voice generations: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve voice generations"
+        )
+
+# Background tasks
+async def process_voice_model_background(
+    model_id: str,
+    user_id: str,
+    audio_files: List[UploadFile]
+):
+    """Background task to process voice model"""
+    try:
+        logger.info(f"Starting voice model processing for {model_id}")
+        
+        # Update status to processing
+        firebase_service = FirebaseService()
+        await firebase_service.update_voice_model_status(
+            model_id,
+            VoiceStatus.PROCESSING.value,
+            processing_started_at=datetime.utcnow().isoformat()
+        )
+        
+        # Process with voice cloning service
+        voice_cloning_service = VoiceCloningService()
+        result = await voice_cloning_service.create_voice_model(
+            model_id=model_id,
+            user_id=user_id,
+            audio_files=audio_files
+        )
+        
+        # Update model with results
+        await firebase_service.update_voice_model_processing_result(
+            model_id,
+            result
+        )
+        
+        logger.info(f"Voice model processing completed for {model_id}")
+        
+    except Exception as e:
+        logger.error(f"Voice model processing failed for {model_id}: {e}")
+        
+        # Update status to failed
+        try:
+            firebase_service = FirebaseService()
+            await firebase_service.update_voice_model_status(
+                model_id,
+                VoiceStatus.FAILED.value,
+                error_message=str(e)
+            )
+        except Exception as update_error:
+            logger.error(f"Failed to update error status: {update_error}")
+
+async def generate_speech_background(
+    generation_id: str,
+    model_id: str,
+    text: str,
+    speed: float,
+    pitch: float,
+    emotion: Optional[str]
+):
+    """Background task to generate speech"""
+    try:
+        logger.info(f"Starting speech generation for {generation_id}")
+        
+        # Update status to processing
+        firebase_service = FirebaseService()
+        await firebase_service.update_voice_generation_status(
+            generation_id,
+            VoiceStatus.PROCESSING.value
+        )
+        
+        # Generate speech
+        voice_cloning_service = VoiceCloningService()
+        result = await voice_cloning_service.generate_speech(
+            model_id=model_id,
+            text=text,
+            speed=speed,
+            pitch=pitch,
+            emotion=emotion
+        )
+        
+        # Update generation with results
+        await firebase_service.update_voice_generation_result(
+            generation_id,
+            result
+        )
+        
+        logger.info(f"Speech generation completed for {generation_id}")
+        
+    except Exception as e:
+        logger.error(f"Speech generation failed for {generation_id}: {e}")
+        
+        # Update status to failed
+        try:
+            firebase_service = FirebaseService()
+            await firebase_service.update_voice_generation_status(
+                generation_id,
+                VoiceStatus.FAILED.value,
+                error_message=str(e)
+            )
+        except Exception as update_error:
+            logger.error(f"Failed to update error status: {update_error}")

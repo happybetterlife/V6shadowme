@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    container_name: voiceshadow-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=true
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - SECRET_KEY=${SECRET_KEY}
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./backend:/app
+      - ./shared:/app/shared
+      - uploads:/app/uploads
+      - models:/app/models
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - voiceshadow-network
+
+  # Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    container_name: voiceshadow-frontend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend:/app
+    restart: unless-stopped
+    networks:
+      - voiceshadow-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: voiceshadow-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks:
+      - voiceshadow-network
+
+  # PostgreSQL database (optional)
+  postgres:
+    image: postgres:15-alpine
+    container_name: voiceshadow-postgres
+    environment:
+      - POSTGRES_DB=voiceshadow
+      - POSTGRES_USER=voiceshadow
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-voiceshadow123}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - voiceshadow-network
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: voiceshadow-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    networks:
+      - voiceshadow-network
+
+volumes:
+  uploads:
+  models:
+  redis-data:
+  postgres-data:
+
+networks:
+  voiceshadow-network:
+    driver: bridge

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  app:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./app.db  # SQLite for development
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DEBUG=True
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - .:/app  # Mount source code for hot reload
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    
+  # Optional: Redis for development (if needed)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+
+volumes:
+  redis_dev_data:

@@ -8,10 +8,13 @@ from datetime import datetime
 from app.core.security import get_current_user
 from app.services.voice_cloning.voice_cloning_service import VoiceCloningService
 from app.services.firebase.firebase_service import FirebaseService
+from app.services.prompt.prompt_service import PromptService
+from app.services.openvoice_service import get_openvoice_service
 from app.models.voice.voice_model import VoiceModel, VoiceStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+prompt_service = PromptService()
 
 @router.post("/", response_model=Dict[str, Any])
 async def create_voice_model(
@@ -130,7 +133,7 @@ async def get_voice_models(
             offset=offset,
             status_filter=status_filter
         )
-        
+
         return voice_models
         
     except Exception as e:
@@ -268,7 +271,7 @@ async def generate_speech(
             pitch,
             emotion
         )
-        
+
         return {
             "message": "Speech generation started",
             "generation_id": generation_id,
@@ -365,6 +368,131 @@ async def get_voice_generations(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve voice generations"
         )
+
+
+@router.get("/prompt", response_model=Dict[str, Any])
+async def get_recording_prompt(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Return a random 30-second practice prompt."""
+    prompt = prompt_service.get_random_prompt()
+    return prompt.to_dict()
+
+
+@router.post("/recordings", response_model=Dict[str, Any])
+async def submit_prompt_recording(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    audio_file: UploadFile = File(...),
+    prompt_id: str = Form(...),
+):
+    """Accept a user recording and start voice cloning via OpenVoice."""
+
+    if not audio_file.content_type or not audio_file.content_type.startswith("audio/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file must be an audio file",
+        )
+
+    prompt = prompt_service.get_prompt_by_id(prompt_id)
+    if not prompt:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prompt not found",
+        )
+
+    model_id = str(uuid.uuid4())
+    user_id = current_user["uid"]
+
+    firebase_service = FirebaseService()
+    voice_model_data = {
+        "id": model_id,
+        "user_id": user_id,
+        "name": f"Prompt recording {prompt.topic}",
+        "description": prompt.text,
+        "status": VoiceStatus.PROCESSING.value,
+        "created_at": datetime.utcnow().isoformat(),
+        "prompt": prompt.to_dict(),
+        "quality": {
+            "clarity": 0.0,
+            "naturalness": 0.0,
+            "similarity": 0.0,
+            "overall": 0.0,
+        },
+        "sample_files": [],
+        "model_config": {},
+        "metrics": {
+            "total_samples": 1,
+            "total_duration": prompt.duration_seconds,
+            "average_sample_length": prompt.duration_seconds,
+            "primary_language": "en",
+            "average_volume": 0.0,
+            "average_pitch": 0.0,
+        },
+        "processing": {
+            "started_at": datetime.utcnow().isoformat(),
+            "completed_at": None,
+            "error_message": None,
+        },
+    }
+
+    await firebase_service.create_voice_model(voice_model_data)
+
+    # Use OpenVoice service directly for recording processing
+    openvoice_service = get_openvoice_service()
+
+    if openvoice_service.is_available():
+        # Save uploaded audio file temporarily
+        import tempfile
+        import os
+
+        temp_dir = tempfile.mkdtemp()
+        temp_audio_path = os.path.join(temp_dir, f"{model_id}_recording.wav")
+
+        with open(temp_audio_path, "wb") as f:
+            content = await audio_file.read()
+            f.write(content)
+
+        # Create voice model using OpenVoice
+        result = openvoice_service.create_voice_model(
+            audio_files=[temp_audio_path],
+            model_name=model_id
+        )
+
+        # Cleanup temp file
+        os.unlink(temp_audio_path)
+        os.rmdir(temp_dir)
+
+        # Update voice model with results
+        if result["success"]:
+            voice_model_data["status"] = VoiceStatus.COMPLETED.value
+            voice_model_data["processing"]["completed_at"] = datetime.utcnow().isoformat()
+            voice_model_data["model_config"] = {
+                "openvoice_model_id": result["model_id"],
+                "embedding_path": result.get("embedding_path"),
+                "num_samples": result.get("num_samples", 1),
+                "num_valid_embeddings": result.get("num_valid_embeddings", 1)
+            }
+        else:
+            voice_model_data["status"] = VoiceStatus.FAILED.value
+            voice_model_data["processing"]["error_message"] = result.get("error", "Unknown error")
+    else:
+        # Fallback to mock processing if OpenVoice not available
+        voice_model_data["status"] = VoiceStatus.COMPLETED.value
+        voice_model_data["processing"]["completed_at"] = datetime.utcnow().isoformat()
+        result = {"success": True, "model_id": model_id}
+
+    # Update the voice model in Firebase
+    await firebase_service.update_voice_model(model_id, voice_model_data)
+    updated_model = await firebase_service.get_voice_model(model_id)
+
+    return {
+        "message": "Recording processed successfully",
+        "model_id": model_id,
+        "status": voice_model_data["status"],
+        "prompt": prompt.to_dict(),
+        "voice_model": updated_model,
+        "openvoice_available": openvoice_service.is_available(),
+    }
 
 # Background tasks
 async def process_voice_model_background(

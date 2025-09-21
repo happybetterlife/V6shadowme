@@ -1,12 +1,22 @@
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+from pathlib import Path
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import firebase_admin
-from firebase_admin import auth as firebase_auth, credentials
 import logging
+
+try:
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth, credentials
+except ModuleNotFoundError:  # pragma: no cover - optional dependency for local dev
+    firebase_admin = None
+    firebase_auth = None
+    credentials = None
+    logging.getLogger(__name__).warning(
+        "firebase_admin package not installed; Firebase auth disabled"
+    )
 
 from app.core.config import settings
 
@@ -64,22 +74,37 @@ class FirebaseAuth:
     
     def _initialize_firebase(self):
         """Initialize Firebase Admin SDK"""
+        if firebase_admin is None or credentials is None:
+            logger.info("Skipping Firebase Admin SDK initialisation (dependency missing)")
+            return
+
         try:
+            cred_source: Any
+            cred_path = Path(settings.FIREBASE_CREDENTIALS_PATH)
+            if cred_path.is_file():
+                cred_source = str(cred_path)
+            else:
+                cred_source = settings.firebase_credentials
+
             if not firebase_admin._apps:
-                cred = credentials.Certificate(settings.firebase_credentials)
+                cred = credentials.Certificate(cred_source)
                 self.app = firebase_admin.initialize_app(cred)
                 logger.info("Firebase Admin SDK initialized successfully")
             else:
                 self.app = firebase_admin.get_app()
         except Exception as e:
-            logger.error(f"Failed to initialize Firebase Admin SDK: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Firebase initialization failed"
-            )
-    
+            logger.warning(f"Failed to initialize Firebase Admin SDK: {e}")
+            logger.warning("Firebase authentication will be disabled for this session")
+            self.app = None
+
     async def verify_firebase_token(self, token: str) -> Dict[str, Any]:
         """Verify Firebase ID token"""
+        if firebase_auth is None or self.app is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Firebase authentication is unavailable in this environment",
+            )
+
         try:
             decoded_token = firebase_auth.verify_id_token(token)
             return {
@@ -104,6 +129,9 @@ class FirebaseAuth:
     
     async def get_user_by_uid(self, uid: str) -> Optional[Dict[str, Any]]:
         """Get user by Firebase UID"""
+        if firebase_auth is None:
+            return None
+
         try:
             user_record = firebase_auth.get_user(uid)
             return {

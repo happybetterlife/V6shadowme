@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+database/data/
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+temp/
+tmp/
+uploads/
+*.tmp
+
+# Model files (large binary files)
+models/*.bin
+models/*.pth
+models/*.ckpt
+models/*.safetensors
+OpenVoice/checkpoints/
+
+# Audio files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+
+# Firebase
+firebase-credentials.json
+serviceAccountKey.json
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Documentation
+docs/_build/
+site/
+
+# Package manager
+pip-log.txt
+pip-delete-this-directory.txt
+
+# System
+Thumbs.db
+desktop.ini

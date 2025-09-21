@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -8,8 +9,29 @@ from contextlib import asynccontextmanager
 
 from app.core.config import settings
 from app.core.security import get_current_user
-from app.api.endpoints import auth, voice_cloning, speech_analysis, user_progress
+from app.api.endpoints import auth, voice_cloning, speech_analysis, user_progress, personas
+# Import scheduler separately to handle optional dependencies
+try:
+    from app.api.endpoints import scheduler
+    SCHEDULER_AVAILABLE = True
+except ImportError as e:
+    print(f"Scheduler endpoint not available: {e}")
+    scheduler = None
+    SCHEDULER_AVAILABLE = False
 from app.services.firebase.firebase_service import FirebaseService
+from app.services.openvoice_service import get_openvoice_service
+
+# Import scheduler service (optional)
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from services.scheduler_service import scheduler_service
+    SCHEDULER_SERVICE_AVAILABLE = True
+except ImportError as e:
+    print(f"Scheduler service not available: {e}")
+    scheduler_service = None
+    SCHEDULER_SERVICE_AVAILABLE = False
 
 # Configure logging
 logging.basicConfig(
@@ -30,11 +52,42 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize Firebase: {e}")
         raise
-    
+
+    # Initialize OpenVoice
+    try:
+        openvoice_service = get_openvoice_service()
+        if openvoice_service.is_available():
+            logger.info("OpenVoice initialized successfully")
+        else:
+            logger.warning("OpenVoice not available - voice cloning features may be limited")
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenVoice: {e}")
+        logger.warning("Continuing without OpenVoice - voice cloning features may be limited")
+
+    # Start scheduler service for trend data collection
+    if SCHEDULER_SERVICE_AVAILABLE and scheduler_service:
+        try:
+            await scheduler_service.start()
+            logger.info("Scheduler service started successfully")
+            logger.info("Trend data collection will run every 2 hours")
+        except Exception as e:
+            logger.error(f"Failed to start scheduler service: {e}")
+            logger.warning("Continuing without automatic trend data collection")
+    else:
+        logger.info("Scheduler service not available - trend collection disabled")
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down VoiceShadow API...")
+
+    # Stop scheduler service
+    if SCHEDULER_SERVICE_AVAILABLE and scheduler_service:
+        try:
+            await scheduler_service.stop()
+            logger.info("Scheduler service stopped")
+        except Exception as e:
+            logger.error(f"Error stopping scheduler service: {e}")
 
 # Create FastAPI app
 app = FastAPI(
@@ -88,6 +141,22 @@ app.include_router(
     tags=["User Progress"],
     dependencies=[Depends(get_current_user)]
 )
+
+app.include_router(
+    personas.router,
+    prefix="/api/v1/personas",
+    tags=["Voice Personas"],
+    dependencies=[Depends(get_current_user)]
+)
+
+# Include scheduler router only if available
+if SCHEDULER_AVAILABLE and scheduler:
+    app.include_router(
+        scheduler.router,
+        prefix="/api/v1/scheduler",
+        tags=["Scheduler Management"],
+        dependencies=[Depends(get_current_user)]
+    )
 
 @app.get("/")
 async def root():

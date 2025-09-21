@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
     # Firebase Configuration
-    FIREBASE_PROJECT_ID: str = "v6-shadowme"
+    FIREBASE_PROJECT_ID: str = "v7-shadowme"
     FIREBASE_PRIVATE_KEY_ID: str = ""
     FIREBASE_PRIVATE_KEY: str = ""
     FIREBASE_CLIENT_EMAIL: str = ""
@@ -29,6 +29,26 @@ class Settings(BaseSettings):
     FIREBASE_TOKEN_URI: str = "https://oauth2.googleapis.com/token"
     FIREBASE_AUTH_PROVIDER_X509_CERT_URL: str = ""
     FIREBASE_CLIENT_X509_CERT_URL: str = ""
+    FIREBASE_CREDENTIALS_PATH: str = "./firebase-credentials.json"
+
+    # Environment Settings
+    APP_ENV: str = "development"
+
+    # Database Configuration
+    USE_SQLITE_DB: bool = True
+    OFFLINE_MODE: bool = False
+
+    # Feature Flags
+    ENABLE_TREND_COLLECTION: bool = True
+    ENABLE_SCHEDULER: bool = True
+    ENABLE_GOOGLE_TRENDS: bool = False
+    ENABLE_NEWS_API: bool = True
+    ENABLE_REDDIT_API: bool = False
+    USE_MOCK_DATA: bool = False
+
+    # Trend Collection Settings
+    TREND_COLLECTION_INTERVAL: int = 2
+    TRENDS_CACHE_DURATION: int = 3600
     
     # Storage Configuration
     UPLOAD_DIR: str = "uploads"

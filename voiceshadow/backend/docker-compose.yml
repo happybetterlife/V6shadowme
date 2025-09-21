@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  voiceshadow-backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=false
+      - SECRET_KEY=your-production-secret-key-change-this
+      - FIREBASE_PROJECT_ID=v7-shadowme
+      - APP_ENV=production
+      - USE_SQLITE_DB=true
+      - OFFLINE_MODE=false
+      - ENABLE_TREND_COLLECTION=true
+      - ENABLE_SCHEDULER=true
+      - ALLOWED_HOSTS=*
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./models:/app/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  data:
+  logs:
+  uploads:
+  models:

@@ -19,7 +19,15 @@ except ImportError as e:
     scheduler = None
     SCHEDULER_AVAILABLE = False
 from app.services.firebase.firebase_service import FirebaseService
-from app.services.openvoice_service import get_openvoice_service
+
+# Optional import for OpenVoice service
+try:
+    from app.services.openvoice_service import get_openvoice_service
+    OPENVOICE_AVAILABLE = True
+except ImportError:
+    print("OpenVoice service not available - torch/OpenVoice not installed")
+    get_openvoice_service = None
+    OPENVOICE_AVAILABLE = False
 
 # Import scheduler service (optional)
 import sys
@@ -53,16 +61,19 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize Firebase: {e}")
         raise
 
-    # Initialize OpenVoice
-    try:
-        openvoice_service = get_openvoice_service()
-        if openvoice_service.is_available():
-            logger.info("OpenVoice initialized successfully")
-        else:
-            logger.warning("OpenVoice not available - voice cloning features may be limited")
-    except Exception as e:
-        logger.error(f"Failed to initialize OpenVoice: {e}")
-        logger.warning("Continuing without OpenVoice - voice cloning features may be limited")
+    # Initialize OpenVoice (if available)
+    if OPENVOICE_AVAILABLE and get_openvoice_service:
+        try:
+            openvoice_service = get_openvoice_service()
+            if openvoice_service.is_available():
+                logger.info("OpenVoice initialized successfully")
+            else:
+                logger.warning("OpenVoice not available - voice cloning features may be limited")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenVoice: {e}")
+            logger.warning("Continuing without OpenVoice - voice cloning features may be limited")
+    else:
+        logger.warning("OpenVoice module not available - voice cloning features will be disabled")
 
     # Start scheduler service for trend data collection
     if SCHEDULER_SERVICE_AVAILABLE and scheduler_service:
@@ -202,10 +213,12 @@ async def general_exception_handler(request, exc):
     )
 
 if __name__ == "__main__":
+    import os
+    port = int(os.getenv("PORT", "8000"))
     uvicorn.run(
-        "main:app",
+        "app.main:app",
         host="0.0.0.0",
-        port=8000,
+        port=port,
         reload=settings.DEBUG,
         log_level="info"
     )

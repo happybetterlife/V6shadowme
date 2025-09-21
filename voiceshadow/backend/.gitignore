@@ -61,6 +61,9 @@ models/*.pth
 models/*.ckpt
 models/*.safetensors
 OpenVoice/checkpoints/
+# Large checkpoint files (>100MB)
+**/checkpoint.pth
+models/openvoice/checkpoints/**/*.pth
 
 # Audio files
 *.wav

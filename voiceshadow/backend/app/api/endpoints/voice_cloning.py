@@ -9,8 +9,26 @@ from app.core.security import get_current_user
 from app.services.voice_cloning.voice_cloning_service import VoiceCloningService
 from app.services.firebase.firebase_service import FirebaseService
 from app.services.prompt.prompt_service import PromptService
-from app.services.openvoice_service import get_openvoice_service
-from app.models.voice.voice_model import VoiceModel, VoiceStatus
+
+# Optional import for voice cloning service
+try:
+    from app.services.openvoice_service import get_openvoice_service
+    OPENVOICE_AVAILABLE = True
+except ImportError:
+    get_openvoice_service = None
+    OPENVOICE_AVAILABLE = False
+
+try:
+    from app.models.voice.voice_model import VoiceModel, VoiceStatus
+except ImportError:
+    VoiceModel = None
+    # Create a mock VoiceStatus for when the module is not available
+    class VoiceStatus:
+        PENDING = type('', (), {'value': 'pending'})()
+        PROCESSING = type('', (), {'value': 'processing'})()
+        COMPLETED = type('', (), {'value': 'completed'})()
+        FAILED = type('', (), {'value': 'failed'})()
+        CANCELLED = type('', (), {'value': 'cancelled'})()
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,6 +43,13 @@ async def create_voice_model(
     audio_files: List[UploadFile] = File(...)
 ):
     """Create a new voice model"""
+    # Check if OpenVoice is available
+    if not OPENVOICE_AVAILABLE:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Voice cloning service is currently unavailable. OpenVoice module is not installed."
+        )
+
     try:
         # Validate input
         if not name or len(name.strip()) < 2:
@@ -438,43 +463,43 @@ async def submit_prompt_recording(
     await firebase_service.create_voice_model(voice_model_data)
 
     # Use OpenVoice service directly for recording processing
-    openvoice_service = get_openvoice_service()
+    if OPENVOICE_AVAILABLE and get_openvoice_service:
+        openvoice_service = get_openvoice_service()
+        if openvoice_service.is_available():
+            # Save uploaded audio file temporarily
+            import tempfile
+            import os
 
-    if openvoice_service.is_available():
-        # Save uploaded audio file temporarily
-        import tempfile
-        import os
+            temp_dir = tempfile.mkdtemp()
+            temp_audio_path = os.path.join(temp_dir, f"{model_id}_recording.wav")
 
-        temp_dir = tempfile.mkdtemp()
-        temp_audio_path = os.path.join(temp_dir, f"{model_id}_recording.wav")
+            with open(temp_audio_path, "wb") as f:
+                content = await audio_file.read()
+                f.write(content)
 
-        with open(temp_audio_path, "wb") as f:
-            content = await audio_file.read()
-            f.write(content)
+            # Create voice model using OpenVoice
+            result = openvoice_service.create_voice_model(
+                audio_files=[temp_audio_path],
+                model_name=model_id
+            )
 
-        # Create voice model using OpenVoice
-        result = openvoice_service.create_voice_model(
-            audio_files=[temp_audio_path],
-            model_name=model_id
-        )
+            # Cleanup temp file
+            os.unlink(temp_audio_path)
+            os.rmdir(temp_dir)
 
-        # Cleanup temp file
-        os.unlink(temp_audio_path)
-        os.rmdir(temp_dir)
-
-        # Update voice model with results
-        if result["success"]:
-            voice_model_data["status"] = VoiceStatus.COMPLETED.value
-            voice_model_data["processing"]["completed_at"] = datetime.utcnow().isoformat()
-            voice_model_data["model_config"] = {
-                "openvoice_model_id": result["model_id"],
-                "embedding_path": result.get("embedding_path"),
-                "num_samples": result.get("num_samples", 1),
-                "num_valid_embeddings": result.get("num_valid_embeddings", 1)
-            }
-        else:
-            voice_model_data["status"] = VoiceStatus.FAILED.value
-            voice_model_data["processing"]["error_message"] = result.get("error", "Unknown error")
+            # Update voice model with results
+            if result["success"]:
+                voice_model_data["status"] = VoiceStatus.COMPLETED.value
+                voice_model_data["processing"]["completed_at"] = datetime.utcnow().isoformat()
+                voice_model_data["model_config"] = {
+                    "openvoice_model_id": result["model_id"],
+                    "embedding_path": result.get("embedding_path"),
+                    "num_samples": result.get("num_samples", 1),
+                    "num_valid_embeddings": result.get("num_valid_embeddings", 1)
+                }
+            else:
+                voice_model_data["status"] = VoiceStatus.FAILED.value
+                voice_model_data["processing"]["error_message"] = result.get("error", "Unknown error")
     else:
         # Fallback to mock processing if OpenVoice not available
         voice_model_data["status"] = VoiceStatus.COMPLETED.value
